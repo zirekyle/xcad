@@ -239,8 +239,6 @@ if __name__ == '__main__':
 
     video_links = get_video_links(args.tag, args.game, args.limit)
 
-    print(video_links)
-
     list_data = drive.ListFile({'q': "'{}' in parents and trashed=false".format(folder_id)}).GetList()
 
     for video in video_links:
