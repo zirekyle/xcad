@@ -19,7 +19,7 @@ def get_setting(setting_name):
     :return: value of the setting
     """
 
-    if not exists ('settings.yaml'):
+    if not exists('settings.yaml'):
         print('settings.yaml not found\n')
         return None
 
@@ -83,13 +83,62 @@ def check_file_exists_in_drive_folder(google_drive, filename):
     :return: True if exists, False if not
     """
 
-    folder_id = get_setting('drive_folder_id')
+    drive_folder_id = get_setting('drive_folder_id')
 
-    file_list = google_drive.ListFile({'q': "'{}' in parents and trashed=false".format(folder_id)}).GetList()
+    file_list = google_drive.ListFile({'q': "'{}' in parents and trashed=false".format(drive_folder_id)}).GetList()
 
     file_names = [f['title'] for f in file_list]
 
     return filename in file_names
+
+
+def get_video_links(gamertag, game_name=None, limit=0):
+    """
+    Pull a list of video page URLs from an index page
+    :param gamertag: gamertag
+    :param game_name: game name filter (optional)
+    :param limit: number to download (optional)
+    :return: list of individual video page URLs
+    """
+
+    videos = []
+
+    count = 0
+
+    index_url = get_setting('index_url').replace('%USER%', gamertag)
+    base_url = get_setting('base_url')
+
+    index = BeautifulSoup(requests.get(index_url).text, 'html.parser')
+
+    for entry in index.find_all('div', {'class': 'large-3'}):
+
+        name = entry.find_next('b').text
+
+        if game_name and game_name.lower() not in name.lower():
+            continue
+
+        video_url = entry.find_next('a').get('href')
+
+        new_page = BeautifulSoup(requests.get(base_url + video_url).text, 'html.parser')
+
+        date = new_page.find_all('li')[0].text.split('Recorded: ')[1].replace(':', '-').replace(' ', '-')
+        link = new_page.find_all('source')[0].get('src')
+
+        strip_chars = [' ', ':', '®', '™']
+
+        for char in strip_chars:
+            name = name.replace(char, '') if char in name else name
+
+        filename = '{}_{}_{}'.format(gamertag.capitalize(), name, date)
+
+        videos.append((filename, link))
+
+        count += 1
+
+        if limit and count >= limit:
+            break
+
+    return videos
 
 
 def download_video(video_link, video_name):
@@ -151,53 +200,13 @@ def upload_video_to_google_drive(video_name, google_drive):
 
     if check_file_exists_in_drive_folder(google_drive, video_name):
         print('success')
+        if exists('{}{}'.format(tmp_dir, video[0])):
+            remove('{}{}'.format(tmp_dir, video[0]))
         return True
 
     else:
         print('failure')
         return False
-
-
-def get_video_links(gamertag, game_name=None, limit=0):
-    """
-    Pull a list of video page URLs from an index page
-    :param gamertag: gamertag
-    :param game_name: game name filter (optional)
-    :param limit: number to download (optional)
-    :return: list of individual video page URLs
-    """
-
-    videos = []
-
-    count = 0
-
-    index_url = get_setting('index_url').replace('%USER%', gamertag)
-    base_url = get_setting('base_url')
-
-    index = BeautifulSoup(requests.get(index_url).text, 'html.parser')
-
-    for entry in index.find_all('div', {'class': 'top-row'}):
-
-        name = entry.find_next('a').text.lower()
-
-        if game_name and game_name not in name:
-            continue
-
-        video_url = entry.find_next('a').find_next('a').get('href')
-        new_page = BeautifulSoup(requests.get(base_url + video_url).text, 'html.parser')
-
-        link = new_page.find_all('a', {'onclick': "ga('send', 'event', 'Video', 'action', 'Download');"})[0]
-        url = link.get('href')
-        name = link.get('download')
-
-        videos.append((name, url))
-
-        count += 1
-
-        if limit and count >= limit:
-            break
-
-    return videos
 
 
 if __name__ == '__main__':
@@ -225,11 +234,12 @@ if __name__ == '__main__':
     args = parser.parse_args()
 
     folder_id = get_setting('drive_folder_id')
-    tmp_dir = get_setting('tmp_dir')
 
     drive = authenticate_google_drive()
 
     video_links = get_video_links(args.tag, args.game, args.limit)
+
+    print(video_links)
 
     list_data = drive.ListFile({'q': "'{}' in parents and trashed=false".format(folder_id)}).GetList()
 
@@ -247,8 +257,4 @@ if __name__ == '__main__':
         else:
             continue
 
-        if uploaded and exists('{}{}'.format(tmp_dir, video[0])):
-            remove('{}{}'.format(tmp_dir, video[0]))
-
         write_to_log('file: {} downloaded: {} uploaded: {}'.format(video[0], downloaded, uploaded))
-
