@@ -8,9 +8,14 @@ xbox clip auto downloader
 Setup:
 
 1. Create an OAuth credentials for your Google Drive account: https://developers.google.com/adwords/api/docs/guides/authentication (choose desktop app as type)
-2. Rename sample_settings.yaml to settings.yaml and add in your client_id and client_secret
+2. Rename sample_settings.yaml to settings.yaml
 3. Navigate to the destination folder in Google Drive and copy the ID from the end of the URL, insert that into settings.yaml (and change any other settings you want)
 
 Usage:
 
-python xcad.py -t gamertag -g "game name" -l number_to_download
+python xcad.py -t gamertag -g "game name"
+
+Options:
+
+-l LIMIT: limit to X download/uploads
+-a: process all videos (default is last two months)

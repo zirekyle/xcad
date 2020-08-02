@@ -1,22 +1,5 @@
-client_config_backend: settings
-client_config:
-  client_id: client_id
-  client_secret: client_secret
-
-save_credentials: True
-save_credentials_backend: file
-save_credentials_file: credentials.json
-
-get_refresh_token: True
-
-oauth_scope:
-  - https://www.googleapis.com/auth/drive.file
-  - https://www.googleapis.com/auth/drive.install
-
-xcad_settings:
-  index_url: https://gamerdvr.com/gamer/%USER%/videos
-  base_url: https://gamerdvr.com
-  temp_dir: tmp/
-  drive_folder_id: 23fn23fn23ko23eko23ko2kf23
-  log_file: log.txt
-  credentials_file: credentials.txt
+index_url: https://gameclips.io/%USER%
+base_url: https://gameclips.io
+temp_dir: downloads/
+drive_folder_name: Xbox
+drive_folder_id: 23fn23fn23ko23eko23ko2kf23
