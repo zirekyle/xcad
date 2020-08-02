@@ -1,15 +1,34 @@
 #!/usr/bin/env python
 
 import argparse
-import yaml
+import pickle
 import requests
+import yaml
 
 from bs4 import BeautifulSoup
+from datetime import datetime
+from googleapiclient.discovery import build
+from google_auth_oauthlib.flow import InstalledAppFlow
+from google.auth.transport.requests import Request
+from googleapiclient.http import MediaFileUpload
 from os import remove
 from os.path import exists
 
-from pydrive.drive import GoogleDrive
-from pydrive.auth import GoogleAuth
+
+month_numbers = {
+    'Jan': '01',
+    'Feb': '02',
+    'Mar': '03',
+    'Apr': '04',
+    'May': '05',
+    'Jun': '06',
+    'Jul': '07',
+    'Aug': '08',
+    'Sep': '09',
+    'Oct': '10',
+    'Nov': '11',
+    'Dec': '12',
+}
 
 
 def get_setting(setting_name):
@@ -27,23 +46,7 @@ def get_setting(setting_name):
 
     yaml_data = yaml.safe_load(file)
 
-    return yaml_data.get('xcad_settings').get(setting_name)
-
-
-def write_to_log(data, print_to_screen=False):
-    """
-    Write data to log file
-    :param data: data to log (string)
-    :param print_to_screen: print to screen also? (boolean)
-    :return: nothing
-    """
-
-    log = open(get_setting('log_file'), 'a')
-    log.write(data)
-    log.close()
-
-    if print_to_screen:
-        print(data)
+    return yaml_data.get(setting_name)
 
 
 def authenticate_google_drive():
@@ -52,52 +55,91 @@ def authenticate_google_drive():
     :return: authenticated drive object
     """
 
-    gauth = GoogleAuth()
+    scopes = ['https://www.googleapis.com/auth/drive']
 
-    gauth.LoadCredentialsFile(get_setting('credentials_file'))
+    credentials = None
 
-    if gauth.credentials is None:
-        print('Credentials not found. Please click this link to authenticate:\n')
-        print(gauth.GetAuthUrl())
-        code = input('Code: ')
-        gauth.Auth(code)
+    if exists('token.pickle'):
+        with open('token.pickle', 'rb') as token:
+            credentials = pickle.load(token)
 
-    elif gauth.access_token_expired:
-        gauth.Refresh()
+    if not credentials or not credentials.valid:
+        if credentials and credentials.expired and credentials.refresh_token:
+            credentials.refresh(Request())
+        else:
+            flow = InstalledAppFlow.from_client_secrets_file(
+                'credentials.json', scopes)
+            credentials = flow.run_local_server(port=0)
 
-    else:
-        gauth.Authorize()
+        with open('token.pickle', 'wb') as token:
+            pickle.dump(credentials, token)
 
-    gauth.SaveCredentialsFile(get_setting('credentials_file'))
+    service = build('drive', 'v3', credentials=credentials)
 
-    google_drive = GoogleDrive(gauth)
-
-    return google_drive
+    return service
 
 
-def check_file_exists_in_drive_folder(google_drive, filename):
+def build_folder_tree(drive, folder_name, folder_id):
     """
-    Check if a filename exists in Google Drive
-    :param google_drive: Google Drive object
-    :param filename: filename to check for
-    :return: True if exists, False if not
+    Build a folder tree dictionary from Google Drive
+    :param drive: google drive object
+    :return: dict folder tree
     """
 
-    drive_folder_id = get_setting('drive_folder_id')
+    tree = {'name': folder_name, 'id': folder_id, 'contents': []}
 
-    file_list = google_drive.ListFile({'q': "'{}' in parents and trashed=false".format(drive_folder_id)}).GetList()
+    page_token = None
 
-    file_names = [f['title'] for f in file_list]
+    while True:
+        response = drive.files().list(q="'{}' in parents and trashed=false".format(folder_id),
+                                      spaces='drive', fields='nextPageToken, files(id, name, mimeType, parents, trashed)',
+                                      pageToken=page_token).execute()
 
-    return filename in file_names
+        for file in response.get('files', []):
+
+            if file.get('mimeType') == 'application/vnd.google-apps.folder':
+                tree['contents'].append(build_folder_tree(drive, file.get('name'), file.get('id')))
+            else:
+                tree['contents'].append(file.get('name'))
+
+        page_token = response.get('nextPageToken', None)
+
+        if page_token is None:
+            break
+
+    return tree
 
 
-def get_video_links(gamertag, game_name=None, limit=0):
+def find_home_folder(tree, filename):
+    """
+    Find the home folder for a filename in the folder tree
+    :param tree: google drive folder tree
+    :param filename: video file name
+    :return: home folder id
+    """
+
+    month, year = month_numbers.get(filename.split('-')[1]), filename.split('-')[2]
+
+    for check_year in tree.get('contents'):
+        if check_year.get('name') != year:
+            continue
+        for check_month in check_year.get('contents'):
+            if check_month.get('name') == month:
+                if filename in check_month.get('contents'):
+                    return 'exists'
+                else:
+                    return check_month.get('id')
+
+    return year, month
+
+
+def get_video_links(gamertag, game_name=None, all_videos=False, limit=0):
     """
     Pull a list of video page URLs from an index page
     :param gamertag: gamertag
-    :param game_name: game name filter (optional)
-    :param limit: number to download (optional)
+    :param game_name: game name filter (default: None)
+    :param all_videos: scan/upload all videos instead of recent (default: False)
+    :param limit: number to download (default: 0/unlimited)
     :return: list of individual video page URLs
     """
 
@@ -122,6 +164,22 @@ def get_video_links(gamertag, game_name=None, limit=0):
         new_page = BeautifulSoup(requests.get(base_url + video_url).text, 'html.parser')
 
         date = new_page.find_all('li')[0].text.split('Recorded: ')[1].replace(':', '-').replace(' ', '-')
+
+        month, year = month_numbers.get(date.split('-')[1]), date.split('-')[2]
+        current_month, current_year = datetime.today().month, datetime.today().year
+
+        skip = False
+
+        if current_month == 1:
+            if int(year) < (current_year - 1) or int(year) == (current_year - 1) and int(month) < 12:
+                skip = True
+        else:
+            if int(year) < current_year or int(month) < (current_month - 1):
+                skip = True
+
+        if skip:
+            continue
+
         link = new_page.find_all('source')[0].get('src')
 
         strip_chars = [' ', ':', '®', '™']
@@ -131,7 +189,8 @@ def get_video_links(gamertag, game_name=None, limit=0):
 
         filename = '{}_{}_{}'.format(gamertag.capitalize(), name, date)
 
-        videos.append((filename, link))
+        if (filename, link) not in videos:
+            videos.append((filename, link))
 
         count += 1
 
@@ -149,23 +208,19 @@ def download_video(video_link, video_name):
     :return: True if file exists after download, False if not
     """
 
-    tmp_dir = get_setting('tmp_dir')
+    print('downloading: {}'.format(video_name))
 
-    print('{}: downloading to local... '.format(video_name), end='')
-
-    if exists('{}{}'.format(get_setting('tmp_dir'), video_name)):
-        print('already exists')
+    if exists('{}{}'.format(get_setting('temp_dir'), video_name)):
         return True
 
     dl = requests.get(video_link, stream=True)
 
-    with open('{}{}'.format(tmp_dir, video_name), "wb") as download:
+    with open('{}{}'.format(get_setting('temp_dir'), video_name), "wb") as download:
         for chunk in dl.iter_content(chunk_size=1024 * 1024):
             if chunk:
                 download.write(chunk)
 
-    if exists('{}{}'.format(tmp_dir, video_name)):
-        print('success')
+    if exists('{}{}'.format(get_setting('temp_dir'), video_name)):
         return True
 
     else:
@@ -173,40 +228,72 @@ def download_video(video_link, video_name):
         return False
 
 
-def upload_video_to_google_drive(video_name, google_drive):
+def upload_video_to_google_drive(google_drive, folder_id, filename):
     """
     Upload a video to Google Drive
-    :param video_name: video filename
     :param google_drive: Google Drive API object
+    :param folder_id: folder to upload to
+    :param filename: name of the file to upload
     :return: True if file exists after upload, False if not
     """
 
-    tmp_dir = get_setting('tmp_dir')
+    print('{}: uploading to drive... '.format(filename), end='')
 
-    print('{}: uploading to drive... '.format(video_name), end='')
+    file_metadata = {'name': filename, 'parents': [folder_id], 'mimeType': 'video/mp4'}
+    media = MediaFileUpload('{}{}'.format(get_setting('temp_dir'), filename), mimetype='video/mp4', resumable=True)
+    file = google_drive.files().create(body=file_metadata, media_body=media, fields='id').execute()
 
-    if check_file_exists_in_drive_folder(google_drive, video_name):
-        print('already exists')
-        return True
+    return True if file.get('id') else False
 
-    f = drive.CreateFile({
-        'title': video_name,
-        'parents': [{"kind": "drive#fileLink", "id": '16PmXsoNmWL8i2AdG5O3QgKS4VzhCBlg3'}]
-    })
 
-    f.SetContentFile('{}{}'.format(tmp_dir, video_name))
-    f.Upload()
-    f = None
+def create_folder(google_drive, tree, year, month):
+    """
+    Create a folder for a new year and/or month
+    :param google_drive: google drive object
+    :param tree: existing folder tree
+    :param year: year
+    :param month: month
+    :return: folder ID
+    """
 
-    if check_file_exists_in_drive_folder(google_drive, video_name):
-        print('success')
-        if exists('{}{}'.format(tmp_dir, video[0])):
-            remove('{}{}'.format(tmp_dir, video[0]))
-        return True
+    year_folder = None
 
-    else:
-        print('failure')
-        return False
+    i = 0
+
+    for check_year in tree.get('contents'):
+        if check_year.get('name') == year:
+            year_folder = i
+        else:
+            i += 1
+
+    if not year_folder:
+        print('creating year {}'.format(year))
+        new_id = google_drive.files().create(
+            body={
+                'name': year,
+                'mimeType': 'application/vnd.google-apps.folder',
+                'parents': [tree.get('id')],
+            },
+            fields='id').execute().get('id')
+        tree['contents'].append({'name': year, 'id': new_id, 'contents': []})
+        year_folder = i
+
+    for check_month in tree.get('contents')[i]:
+        if check_month == month:
+            return check_month.get('id')
+
+    print('creating month {} (parent: {})'.format(month, tree.get('contents')[i].get('id')))
+    new_id = google_drive.files().create(
+        body={
+            'name': month,
+            'mimeType': 'application/vnd.google-apps.folder',
+            'parents': [tree.get('contents')[i].get('id')],
+        },
+        fields='id').execute().get('id')
+
+    tree.get('contents')[i]['contents'].append({'name': month, 'id': new_id, 'contents': []})
+
+    return tree, new_id
 
 
 if __name__ == '__main__':
@@ -231,28 +318,57 @@ if __name__ == '__main__':
                         type=int,
                         default=0)
 
+    parser.add_argument('-a', '--all',
+                        help='process all videos instead of last two months',
+                        action='store_true')
+
+    parser.add_argument('-v', '--verbose',
+                        help='show extra messaging',
+                        action='store_true')
+
     args = parser.parse_args()
 
     folder_id = get_setting('drive_folder_id')
 
+    if args.verbose:
+        print('Authenticating to Google Drive...')
+
     drive = authenticate_google_drive()
 
-    video_links = get_video_links(args.tag, args.game, args.limit)
+    if args.verbose:
+        print('Building existing folder tree...')
 
-    list_data = drive.ListFile({'q': "'{}' in parents and trashed=false".format(folder_id)}).GetList()
+    folder_tree = build_folder_tree(drive, get_setting('drive_folder_name'), get_setting('drive_folder_id'))
+
+    if args.verbose:
+        print('Building video list...')
+
+    video_links = get_video_links(args.tag, args.game, args.all, args.limit)
 
     for video in video_links:
 
-        if check_file_exists_in_drive_folder(drive, video[0]):
-            print('{}: already exists in drive, skipping'.format(video[0]))
+        home = find_home_folder(folder_tree, video[0])
+
+        if isinstance(home, tuple):
+            folder_tree, home = create_folder(drive, folder_tree, home[0], home[1])
+
+        elif home == 'exists':
+            if args.verbose:
+                print('{}: already exists in drive, skipping'.format(video[0]))
             continue
+
+        print('downloading: {}'.format(video[0]))
 
         downloaded = download_video(video[1], video[0])
 
         if downloaded:
-            uploaded = upload_video_to_google_drive(video[0], drive)
+            print('uploading: {}'.format(video[0]))
+            uploaded = upload_video_to_google_drive(drive, home, video[0])
+
+            if uploaded:
+                print('deleting: {}{}'.format(get_setting('temp_dir'), video[0]))
+                remove('{}{}'.format(get_setting('temp_dir'), video[0]))
 
         else:
             continue
 
-        write_to_log('file: {} downloaded: {} uploaded: {}'.format(video[0], downloaded, uploaded))
