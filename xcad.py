@@ -278,16 +278,16 @@ def create_folder(google_drive, tree, year, month):
         tree['contents'].append({'name': year, 'id': new_id, 'contents': []})
         year_folder = i
 
-    for check_month in tree.get('contents')[i]:
+    for check_month in tree.get('contents')[year_folder]:
         if check_month == month:
             return check_month.get('id')
 
-    print('creating month {} (parent: {})'.format(month, tree.get('contents')[i].get('id')))
+    print('creating month {} (parent: {})'.format(month, tree.get('contents')[year_folder].get('id')))
     new_id = google_drive.files().create(
         body={
             'name': month,
             'mimeType': 'application/vnd.google-apps.folder',
-            'parents': [tree.get('contents')[i].get('id')],
+            'parents': [tree.get('contents')[year_folder].get('id')],
         },
         fields='id').execute().get('id')
 
