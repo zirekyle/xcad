@@ -208,8 +208,6 @@ def download_video(video_link, video_name):
     :return: True if file exists after download, False if not
     """
 
-    print('downloading: {}'.format(video_name))
-
     if exists('{}{}'.format(get_setting('temp_dir'), video_name)):
         return True
 
