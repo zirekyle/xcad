@@ -235,8 +235,6 @@ def upload_video_to_google_drive(google_drive, folder_id, filename):
     :return: True if file exists after upload, False if not
     """
 
-    print('{}: uploading to drive... '.format(filename), end='')
-
     file_metadata = {'name': filename, 'parents': [folder_id], 'mimeType': 'video/mp4'}
     media = MediaFileUpload('{}{}'.format(get_setting('temp_dir'), filename), mimetype='video/mp4', resumable=True)
     file = google_drive.files().create(body=file_metadata, media_body=media, fields='id').execute()
