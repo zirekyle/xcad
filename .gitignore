@@ -1,3 +1,6 @@
-/credentials.json
+/cred_gd.json
 /settings.yaml
 /token.pickle
+/cred_yt.json
+/token_gd.pickle
+/token_yt.pickle

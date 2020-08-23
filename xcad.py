@@ -1,6 +1,8 @@
 #!/usr/bin/env python
 
 import argparse
+import googleapiclient.discovery
+import googleapiclient.errors
 import pickle
 import requests
 import yaml
@@ -11,8 +13,10 @@ from googleapiclient.discovery import build
 from google_auth_oauthlib.flow import InstalledAppFlow
 from google.auth.transport.requests import Request
 from googleapiclient.http import MediaFileUpload
+
 from os import remove
 from os.path import exists
+from sys import exit
 
 
 month_numbers = {
@@ -42,14 +46,13 @@ def get_setting(setting_name):
         print('settings.yaml not found\n')
         return None
 
-    file = open('settings.yaml', 'r')
-
-    yaml_data = yaml.safe_load(file)
+    with open('settings.yaml', 'r') as file:
+        yaml_data = yaml.safe_load(file)
 
     return yaml_data.get(setting_name)
 
 
-def authenticate_google_drive():
+def authenticate_google():
     """
     Authenticate to Google drive
     :return: authenticated drive object
@@ -59,8 +62,8 @@ def authenticate_google_drive():
 
     credentials = None
 
-    if exists('token.pickle'):
-        with open('token.pickle', 'rb') as token:
+    if exists('token_gd.pickle'):
+        with open('token_gd.pickle', 'rb') as token:
             credentials = pickle.load(token)
 
     if not credentials or not credentials.valid:
@@ -68,21 +71,44 @@ def authenticate_google_drive():
             credentials.refresh(Request())
         else:
             flow = InstalledAppFlow.from_client_secrets_file(
-                'credentials.json', scopes)
+                'cred_gd.json', scopes)
             credentials = flow.run_local_server(port=0)
 
-        with open('token.pickle', 'wb') as token:
+        with open('token_gd.pickle', 'wb') as token:
             pickle.dump(credentials, token)
 
-    service = build('drive', 'v3', credentials=credentials)
+    gdrive = build('drive', 'v3', credentials=credentials)
 
-    return service
+    scopes = ['https://www.googleapis.com/auth/youtube']
+
+    credentials = None
+
+    if exists('token_yt.pickle'):
+        with open('token_yt.pickle', 'rb') as token:
+            credentials = pickle.load(token)
+
+    if not credentials or not credentials.valid:
+        if credentials and credentials.expired and credentials.refresh_token:
+            credentials.refresh(Request())
+        else:
+            flow = InstalledAppFlow.from_client_secrets_file(
+                'cred_yt.json', scopes)
+            credentials = flow.run_local_server(port=0)
+
+        with open('token_yt.pickle', 'wb') as token:
+            pickle.dump(credentials, token)
+
+    ytube = googleapiclient.discovery.build('youtube', 'v3', credentials=credentials)
+
+    return gdrive, ytube
 
 
-def build_folder_tree(drive, folder_name, folder_id):
+def build_folder_tree(gd, folder_name, folder_id):
     """
     Build a folder tree dictionary from Google Drive
-    :param drive: google drive object
+    :param gd: google drive object
+    :param folder_name: name of the folder in google drive
+    :param folder_id: ID of the folder in google drive
     :return: dict folder tree
     """
 
@@ -91,9 +117,9 @@ def build_folder_tree(drive, folder_name, folder_id):
     page_token = None
 
     while True:
-        response = drive.files().list(q="'{}' in parents and trashed=false".format(folder_id),
-                                      spaces='drive', fields='nextPageToken, files(id, name, mimeType, parents, trashed)',
-                                      pageToken=page_token).execute()
+        response = gd.files().list(q="'{}' in parents and trashed=false".format(folder_id),
+                                   spaces='drive', fields='nextPageToken, files(id, name, mimeType, parents, trashed)',
+                                   pageToken=page_token).execute()
 
         for file in response.get('files', []):
 
@@ -121,6 +147,8 @@ def find_home_folder(tree, filename):
     month, year = month_numbers.get(filename.split('-')[1]), filename.split('-')[2]
 
     for check_year in tree.get('contents'):
+        if isinstance(check_year, str):
+            continue
         if check_year.get('name') != year:
             continue
         for check_month in check_year.get('contents'):
@@ -226,20 +254,74 @@ def download_video(video_link, video_name):
         return False
 
 
-def upload_video_to_google_drive(google_drive, folder_id, filename):
+def upload_video_to_google_drive(google_drive, meta, media):
     """
     Upload a video to Google Drive
     :param google_drive: Google Drive API object
-    :param folder_id: folder to upload to
-    :param filename: name of the file to upload
+    :param meta: file metadata
+    :param media: uploaded media object
     :return: True if file exists after upload, False if not
     """
 
-    file_metadata = {'name': filename, 'parents': [folder_id], 'mimeType': 'video/mp4'}
-    media = MediaFileUpload('{}{}'.format(get_setting('temp_dir'), filename), mimetype='video/mp4', resumable=True)
-    file = google_drive.files().create(body=file_metadata, media_body=media, fields='id').execute()
+    file = google_drive.files().create(body=meta, media_body=media, fields='id').execute()
 
     return True if file.get('id') else False
+
+
+def upload_video_to_youtube(youtube, meta, media):
+    """
+    Upload a video to YouTube
+    :param youtube: youtube session object
+    :param meta: file metadata
+    :param media: uploaded media object
+    :return: True if success, False if not
+    """
+
+    request = youtube.videos().insert(
+        part="snippet,status",
+        body={
+          "snippet": {
+            "description": "This video was automatically uploaded from XCAD.",
+            "title": meta.get('name')
+          },
+          "status": {
+            "privacyStatus": "unlisted"
+          }
+        },
+
+        # TODO: For this request to work, you must replace "YOUR_FILE"
+        #       with a pointer to the actual file you are uploading.
+        media_body=media
+    )
+
+    try:
+        response = request.execute()
+    except googleapiclient.errors.ResumableUploadError:
+        print('Quota exceeded, stopping execution')
+        return False
+
+    if args.verbose:
+        print(response)
+
+    video_id = response.get('id')
+
+    request = youtube.playlistItems().insert(
+        part="snippet",
+        body={
+          "snippet": {
+            "playlistId": get_setting('youtube_playlist'),
+            "position": 0,
+            "resourceId": {
+              "kind": "youtube#video",
+              "videoId": video_id
+            }
+          }
+        }
+    )
+
+    response = request.execute()
+
+    return True if video_id else False
 
 
 def create_folder(google_drive, tree, year, month):
@@ -292,6 +374,34 @@ def create_folder(google_drive, tree, year, month):
     return tree, new_id
 
 
+def list_youtube_playlist_videos(youtube, playlist_id):
+    """
+    Compile a list of video names from a YouTube playlist
+    :param youtube: youtube API object
+    :param playlist_id: playlist ID
+    :return: list of video names
+    """
+
+    video_list = []
+    page_token = None
+
+    while True:
+        call = youtube.playlistItems().list(part='snippet', playlistId=get_setting('youtube_playlist'), pageToken=page_token)
+        response = call.execute()
+
+        for file in response.get('items', []):
+            title = file.get('snippet').get('title')
+            if title not in video_list:
+                video_list.append(file.get('snippet').get('title'))
+
+        page_token = response.get('nextPageToken', None)
+
+        if not page_token:
+            break
+
+    return video_list
+
+
 if __name__ == '__main__':
 
     parser = argparse.ArgumentParser(description='argument parser')
@@ -318,23 +428,33 @@ if __name__ == '__main__':
                         help='process all videos instead of last two months',
                         action='store_true')
 
+    parser.add_argument('--no-delete',
+                        help='do not delete the video after downloading locally',
+                        action='store_true')
+
     parser.add_argument('-v', '--verbose',
                         help='show extra messaging',
                         action='store_true')
 
     args = parser.parse_args()
 
-    folder_id = get_setting('drive_folder_id')
+    gd_folder_name = get_setting('drive_folder_name')
+    gd_folder_id = get_setting('drive_folder_id')
 
     if args.verbose:
         print('Authenticating to Google Drive...')
 
-    drive = authenticate_google_drive()
+    drive, tube = authenticate_google()
 
     if args.verbose:
         print('Building existing folder tree...')
 
-    folder_tree = build_folder_tree(drive, get_setting('drive_folder_name'), get_setting('drive_folder_id'))
+    folder_tree = build_folder_tree(drive, gd_folder_name, gd_folder_id)
+
+    if args.verbose:
+        print('Building YouTube video list...')
+
+    yt_videos = list_youtube_playlist_videos(tube, get_setting('youtube_playlist'))
 
     if args.verbose:
         print('Building video list...')
@@ -342,6 +462,8 @@ if __name__ == '__main__':
     video_links = get_video_links(args.tag, args.game, args.all, args.limit)
 
     for video in video_links:
+
+        skip_gd, skip_yt = False, False
 
         home = find_home_folder(folder_tree, video[0])
 
@@ -351,6 +473,14 @@ if __name__ == '__main__':
         elif home == 'exists':
             if args.verbose:
                 print('{}: already exists in drive, skipping'.format(video[0]))
+            skip_gd = True
+
+        if video[0] in yt_videos:
+            if args.verbose:
+                print('{}: already exists on youtube, skipping'.format(video[0]))
+            skip_yt = True
+
+        if skip_gd and skip_yt:
             continue
 
         print('downloading: {}'.format(video[0]))
@@ -358,13 +488,32 @@ if __name__ == '__main__':
         downloaded = download_video(video[1], video[0])
 
         if downloaded:
-            print('uploading: {}'.format(video[0]))
-            uploaded = upload_video_to_google_drive(drive, home, video[0])
 
-            if uploaded:
+            gd_uploaded, yt_uploaded = False, False
+
+            file_metadata = {'name': video[0], 'parents': [home], 'mimeType': 'video/mp4'}
+            media_upload = MediaFileUpload('{}{}'.format(get_setting('temp_dir'), video[0]), mimetype='video/mp4', resumable=True)
+
+            if not skip_gd:
+                print('uploading to google drive: {}'.format(video[0]))
+                gd_uploaded = upload_video_to_google_drive(drive, file_metadata, media_upload)
+
+            if not skip_yt:
+                print('uploading to youtube: {}'.format(video[0]))
+                yt_uploaded = upload_video_to_youtube(tube, file_metadata, media_upload)
+                if not yt_uploaded:
+                    exit('Upload to YouTube failed, probably quota exceeded, aborting')
+
+            gd_success = skip_gd or gd_uploaded
+            yt_success = skip_yt or yt_uploaded
+
+            if gd_success and yt_success and not args.no_delete:
+                media_upload.stream().close()
                 print('deleting: {}{}'.format(get_setting('temp_dir'), video[0]))
-                remove('{}{}'.format(get_setting('temp_dir'), video[0]))
+                try:
+                    remove('{}{}'.format(get_setting('temp_dir'), video[0]))
+                except PermissionError:
+                    print("couldn't delete {} - in use".format(video[0]))
 
         else:
             continue
-
