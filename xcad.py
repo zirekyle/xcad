@@ -5,6 +5,7 @@ import googleapiclient.discovery
 import googleapiclient.errors
 import pickle
 import requests
+import tweepy
 import yaml
 
 from bs4 import BeautifulSoup
@@ -228,6 +229,77 @@ def get_video_links(gamertag, game_name=None, all_videos=False, limit=0):
     return videos
 
 
+def get_video_links_from_twitter(username):
+    """
+    Get all video links from a Twitter user (for Nintendo Switch shares)
+    :param username: username to get tweets for
+    :return: list of tweet IDs
+    """
+
+    videos = []
+
+    auth = tweepy.AppAuthHandler(get_setting('twitter_api_key'), get_setting('twitter_secret_key'))
+    tapi = tweepy.API(auth)
+
+    tweets = tapi.user_timeline(screen_name=username, count=50)
+
+    for tweet in tweets:
+
+        if tweet.source != 'Nintendo Switch Share':
+            continue
+
+        url = 'https://twitter.com/{}/status/{}'.format(username, tweet.id)
+        link = get_video_url_from_tweet(url)
+        name = '{}_{}_{}'.format(username.capitalize(),
+                                 tweet.text.split(' ')[0].replace('#', '').capitalize(),
+                                 tweet.created_at.strftime('%d-%b-%Y-%H-%M'))
+
+        videos.append([name, link])
+
+    return videos
+
+
+def get_video_url_from_tweet(tweet_link):
+    """
+    Download a video from a tweet
+    :param tweet_link: URL to the tweet with the video
+    :return: filename
+    """
+
+    base_url = 'https://twittervideodownloader.com/'
+
+    r = requests.session()
+    r.get(base_url)
+    csrf = r.cookies.get('csrftoken') if 'csrftoken' in r.cookies else r.cookies.get('csrf')
+
+    data = 'csrfmiddlewaretoken={}&tweet={}'.format(csrf, tweet_link)
+    headers = {
+        'Content-Type': 'application/x-www-form-urlencoded',
+        'Cookie': 'csrftoken={}'.format(csrf),
+        'Referer': 'https://twittervideodownloader.com/',
+    }
+
+    link_list = requests.post('{}/download'.format(base_url), headers=headers, data=data)
+
+    links = BeautifulSoup(link_list.text, 'html.parser')
+
+    videos = []
+
+    for link in links.find_all('a'):
+
+        if 'video.twimg.com' not in link.get('href'):
+            continue
+
+        videos.append([int(link.get('href').split('/')[7].split('x')[0]), link.get('href')])
+
+    videos.sort(key=lambda x: x[0], reverse=True)
+
+    if not videos:
+        return None
+
+    return videos[0][1]
+
+
 def download_video(video_link, video_name):
     """
     Download a video locally
@@ -412,6 +484,12 @@ if __name__ == '__main__':
                         type=str,
                         required=True)
 
+    parser.add_argument('--twitter',
+                        help='twitter user to download',
+                        action='store',
+                        type=str,
+                        default=None)
+
     parser.add_argument('-g', '--game',
                         help='game name',
                         action='store',
@@ -460,6 +538,9 @@ if __name__ == '__main__':
         print('Building video list...')
 
     video_links = get_video_links(args.tag, args.game, args.all, args.limit)
+
+    if args.twitter:
+        video_links += get_video_links_from_twitter(args.twitter)
 
     for video in video_links:
 
