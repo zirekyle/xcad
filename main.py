@@ -500,8 +500,9 @@ def detect_dub(mode: str, video: str) -> bool:
     return False
 
 
-def check_playlist_for_dubs(profile: str):
+def check_playlist_for_dubs(profile: str, latest: bool = True):
 
+    print(f"latest: {latest}")
     load_profiles()
     youtube = initialize_youtube_client(profile)
 
@@ -528,6 +529,8 @@ def check_playlist_for_dubs(profile: str):
 
         for item in response.get('items'):
 
+            print(item.get('contentDetails').get('videoId'))
+
             if item.get('contentDetails').get('videoId') in existing_wins:
                 continue
 
@@ -538,7 +541,7 @@ def check_playlist_for_dubs(profile: str):
                 add_to_youtube_playlist(youtube, win_playlist_id, item.get('contentDetails').get('videoId'))
                 print(f"Adding dub: {url}")
 
-        if not page_token:
+        if not page_token or latest:
             return
 
 
@@ -748,7 +751,7 @@ if __name__ == '__main__':
         case 'process':
             process(arg_profile, arg_mode, arg_count)
         case 'backfill':
-            check_playlist_for_dubs(arg_profile)
+            check_playlist_for_dubs(arg_profile, arg_mode == 'latest')
         case _:
             if action is not None:
                 print(f"Unknown action: {action}")
